@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
-import { SystemProgram, PublicKey } from "@solana/web3.js";
+import { SystemProgram, PublicKey, SYSVAR_CLOCK_PUBKEY, ComputeBudgetProgram } from "@solana/web3.js";
 import { MPL_CORE_PROGRAM_ID } from "@metaplex-foundation/mpl-core";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import assert from "assert";
@@ -48,6 +48,11 @@ describe("anchor-core-staking", () => {
     const result = (await res.json()) as { error?: any };
     if (result.error) throw new Error(`Time travel failed: ${JSON.stringify(result.error)}`);
     await new Promise((r) => setTimeout(r, 1000));
+  }
+
+  async function chainNow(): Promise<number> {
+    const info = await provider.connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY);
+    return Number(info!.data.readBigInt64LE(32));
   }
 
   // Reads a borsh-encoded (String key, String value) attribute from raw account data
@@ -179,7 +184,7 @@ describe("anchor-core-staking", () => {
   });
 
   it("Time travel to the future", async () => {
-    await advanceTime({ absoluteTimestamp: Date.now() + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
+    await advanceTime({ absoluteTimestamp: (await chainNow()) * 1000 + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
   });
 
   // ---------- Task 1.1: claim_rewards ----------
@@ -196,7 +201,7 @@ describe("anchor-core-staking", () => {
 
   it("Claiming again right away fails (no double claim)", async () => {
     try {
-      await program.methods.claimRewards().accountsPartial(rewardAccounts(nftClaim.publicKey)).rpc();
+      await program.methods.claimRewards().accountsPartial(rewardAccounts(nftClaim.publicKey)).preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 250_000 })]).rpc();
       assert.fail("second claim should have failed");
     } catch (err) {
       if (err instanceof anchor.AnchorError) {

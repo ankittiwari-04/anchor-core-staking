@@ -24,4 +24,6 @@ pub enum ErrorCode {
     CollectionAttributesMissing,
     #[msg("Invalid total_staked counter")]
     InvalidCounter,
+    #[msg("Oracle already reflects the current time window")]
+    OracleUpToDate,
 }
