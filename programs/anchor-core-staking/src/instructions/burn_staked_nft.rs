@@ -3,15 +3,16 @@ use anchor_spl::{associated_token::AssociatedToken, token_interface::{Mint, Toke
 use mpl_core::{
     ID as MPL_CORE_ID,
     accounts::{BaseAssetV1, BaseCollectionV1},
-    types::{UpdateAuthority, Attributes, Plugin, FreezeDelegate},
-    instructions::UpdatePluginV1CpiBuilder,
+    types::{UpdateAuthority, Plugin, FreezeDelegate},
+    instructions::{UpdatePluginV1CpiBuilder, BurnV1CpiBuilder},
 };
 use crate::Config;
+use crate::constants::BURN_BONUS_DAYS;
 use crate::error::ErrorCode;
 use crate::utils::*;
 
 #[derive(Accounts)]
-pub struct Unstake<'info> {
+pub struct BurnStakedNft<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
     #[account(
@@ -56,44 +57,23 @@ pub struct Unstake<'info> {
     #[account(address = Pubkey::from(MPL_CORE_ID.to_bytes()))]
     pub mpl_core_program: UncheckedAccount<'info>,
 }
-pub fn handler(ctx: Context<Unstake>) -> Result<()> {
+pub fn handler(ctx: Context<BurnStakedNft>) -> Result<()> {
     let attrs = fetch_asset_attributes(&ctx.accounts.asset.to_account_info())
         .ok_or(ErrorCode::AssetNotStaked)?;
     let info = read_stake_info(&attrs)?;
     require!(info.staked, ErrorCode::AssetNotStaked);
 
     let now = Clock::get()?.unix_timestamp;
-
-    // Freeze period check (based on staked_at)
-    let staked_days = now
-        .checked_sub(info.staked_at)
-        .ok_or(ErrorCode::InvalidTimestamp)?
-        / SECONDS_PER_DAY;
-    require!(staked_days >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
-
-    // Unclaimed reward days (based on last_claimed_at)
-    let reward_days = now
+    let accrued_days = now
         .checked_sub(info.last_claimed_at)
         .ok_or(ErrorCode::InvalidTimestamp)?
         / SECONDS_PER_DAY;
-
-    let attributes_list = build_stake_attributes(info.others, false, 0, 0);
 
     let collection_key = ctx.accounts.collection.key();
     let bump = [ctx.bumps.update_authority];
     let signer_seeds: &[&[u8]] = &[b"update_authority", collection_key.as_ref(), &bump];
 
-    // Reset staking attributes
-    UpdatePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
-    .asset(&ctx.accounts.asset.to_account_info())
-    .collection(Some(&ctx.accounts.collection.to_account_info()))
-    .payer(&ctx.accounts.owner.to_account_info())
-    .authority(Some(&ctx.accounts.update_authority.to_account_info()))
-    .system_program(&ctx.accounts.system_program.to_account_info())
-    .plugin(Plugin::Attributes(Attributes { attribute_list: attributes_list }))
-    .invoke_signed(&[signer_seeds])?;
-
-    // Thaw
+    // 1. Thaw (a frozen asset cannot be burned)
     UpdatePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
     .asset(&ctx.accounts.asset.to_account_info())
     .collection(Some(&ctx.accounts.collection.to_account_info()))
@@ -103,7 +83,7 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     .plugin(Plugin::FreezeDelegate(FreezeDelegate { frozen: false }))
     .invoke_signed(&[signer_seeds])?;
 
-    // Collection stats: total_staked -= 1
+    // 2. Collection stats: total_staked -= 1
     update_total_staked(
         &ctx.accounts.collection.to_account_info(),
         &ctx.accounts.owner.to_account_info(),
@@ -114,9 +94,21 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
         false,
     )?;
 
-    // Mint the remaining (unclaimed) rewards
+    // 3. Burn the NFT using the BurnDelegate authority (update authority PDA)
+    BurnV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
+    .asset(&ctx.accounts.asset.to_account_info())
+    .collection(Some(&ctx.accounts.collection.to_account_info()))
+    .payer(&ctx.accounts.owner.to_account_info())
+    .authority(Some(&ctx.accounts.update_authority.to_account_info()))
+    .system_program(Some(&ctx.accounts.system_program.to_account_info()))
+    .invoke_signed(&[signer_seeds])?;
+
+    // 4. Mint accrued rewards + one-time burn bonus
+    let total_days = accrued_days
+        .checked_add(BURN_BONUS_DAYS)
+        .ok_or(ErrorCode::MathOverflow)?;
     let amount = rewards_amount(
-        reward_days,
+        total_days,
         ctx.accounts.config.rewards_bps,
         ctx.accounts.rewards_mint.decimals,
     )?;

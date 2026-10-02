@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use mpl_core::{
     ID as MPL_CORE_ID,
     instructions::CreateCollectionV2CpiBuilder,
+    types::{Attribute, Attributes, Plugin, PluginAuthority, PluginAuthorityPair},
 };
 
 #[derive(Accounts)]
@@ -22,13 +23,9 @@ pub struct CreateCollection<'info> {
     pub mpl_core_program: UncheckedAccount<'info>,
 }
 pub fn handler(ctx: Context<CreateCollection>, name: String, uri: String) -> Result<()> {
-    // Signer seeds for the update authority
     let collection_key = ctx.accounts.collection.key();
-    let signer_seeds = &[
-        b"update_authority",
-        collection_key.as_ref(),
-        &[ctx.bumps.update_authority],
-    ];
+    let bump = [ctx.bumps.update_authority];
+    let signer_seeds: &[&[u8]] = &[b"update_authority", collection_key.as_ref(), &bump];
 
     CreateCollectionV2CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
     .collection(&ctx.accounts.collection.to_account_info())
@@ -37,6 +34,15 @@ pub fn handler(ctx: Context<CreateCollection>, name: String, uri: String) -> Res
     .system_program(&ctx.accounts.system_program.to_account_info())
     .name(name)
     .uri(uri)
+    .plugins(vec![PluginAuthorityPair {
+        plugin: Plugin::Attributes(Attributes {
+            attribute_list: vec![Attribute {
+                key: "total_staked".to_string(),
+                value: "0".to_string(),
+            }],
+        }),
+        authority: Some(PluginAuthority::UpdateAuthority),
+    }])
     .invoke_signed(&[signer_seeds])?;
 
     Ok(())
