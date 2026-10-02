@@ -1,159 +1,177 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
-import { SystemProgram } from "@solana/web3.js";
+import { SystemProgram, PublicKey } from "@solana/web3.js";
 import { MPL_CORE_PROGRAM_ID } from "@metaplex-foundation/mpl-core";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import assert from "assert";
 
 const MILLISECONDS_PER_DAY = 86400000;
-const REWARDS_BPS = 10000;
+const REWARDS_BPS = 10000; // 1 token per day (6 decimals)
 const FREEZE_PERIOD_IN_DAYS = 7;
 const TIME_TRAVEL_IN_DAYS = 8;
+const BURN_BONUS_DAYS = 365;
+const ONE_TOKEN = 1_000_000n;
 
 describe("anchor-core-staking", () => {
-  // Configure the client to use the local cluster.
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-
   const program = anchor.workspace.anchorCoreStaking as Program<AnchorCoreStaking>;
 
-  // Generate a keypair for the collection
   const collectionKeypair = anchor.web3.Keypair.generate();
+  const nftClaim = anchor.web3.Keypair.generate(); // claimed, then unstaked
+  const nftBurn = anchor.web3.Keypair.generate();  // burned
 
-  // Find the update authority for the collection (PDA)
-  const updateAuthority = anchor.web3.PublicKey.findProgramAddressSync(
+  const updateAuthority = PublicKey.findProgramAddressSync(
     [Buffer.from("update_authority"), collectionKeypair.publicKey.toBuffer()],
     program.programId
   )[0];
-
-  // Generate a keypair for the nft asset
-  const nftKeypair = anchor.web3.Keypair.generate();
-
-  // Find the config account (PDA)
-  const config = anchor.web3.PublicKey.findProgramAddressSync(
+  const config = PublicKey.findProgramAddressSync(
     [Buffer.from("config"), collectionKeypair.publicKey.toBuffer()],
     program.programId
   )[0];
-
-  // Find the rewards mint account (PDA)
-  const rewardsMint = anchor.web3.PublicKey.findProgramAddressSync(
+  const rewardsMint = PublicKey.findProgramAddressSync(
     [Buffer.from("rewards_mint"), config.toBuffer()],
     program.programId
   )[0];
+  const userRewardsAta = getAssociatedTokenAddressSync(
+    rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+  );
 
-  // Helper function to advance time with Surfpool 
-  async function advanceTime(params: { absoluteEpoch?: number; absoluteSlot?: number; absoluteTimestamp?: number }): Promise<void> {
-    const rpcResponse = await fetch(provider.connection.rpcEndpoint, {
+  // ---------- helpers ----------
+  async function advanceTime(params: { absoluteTimestamp: number }): Promise<void> {
+    const res = await fetch(provider.connection.rpcEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "surfnet_timeTravel",
-        params: [params],
-      }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "surfnet_timeTravel", params: [params] }),
     });
-
-    const result = await rpcResponse.json() as { error?: any; result?: any };
-    if (result.error) {
-      throw new Error(`Time travel failed: ${JSON.stringify(result.error)}`);
-    }
-    
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const result = (await res.json()) as { error?: any };
+    if (result.error) throw new Error(`Time travel failed: ${JSON.stringify(result.error)}`);
+    await new Promise((r) => setTimeout(r, 1000));
   }
 
-  it("Create a collection", async () => {
-    const collectionName = "Test Collection";
-    const collectionUri = "https://example.com/collection";
-    const tx = await program.methods.createCollection(collectionName, collectionUri)
-    .accountsPartial({
-      payer: provider.wallet.publicKey,
-      collection: collectionKeypair.publicKey,
-      updateAuthority,
-      systemProgram: SystemProgram.programId,
-      mplCoreProgram: MPL_CORE_PROGRAM_ID,
-    })
-    .signers([collectionKeypair])
-    .rpc();
-    console.log("\nYour transaction signature", tx);
-    console.log("Collection address", collectionKeypair.publicKey.toBase58());
+  // Reads a borsh-encoded (String key, String value) attribute from raw account data
+  async function readAttr(account: PublicKey, key: string): Promise<string | null> {
+    const info = await provider.connection.getAccountInfo(account);
+    if (!info) return null;
+    const k = Buffer.from(key);
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(k.length);
+    const needle = Buffer.concat([len, k]);
+    const idx = info.data.indexOf(needle);
+    if (idx < 0) return null;
+    let off = idx + needle.length;
+    const vlen = info.data.readUInt32LE(off);
+    off += 4;
+    return info.data.subarray(off, off + vlen).toString();
+  }
+
+  async function balance(): Promise<bigint> {
+    try {
+      return BigInt((await provider.connection.getTokenAccountBalance(userRewardsAta)).value.amount);
+    } catch {
+      return 0n;
+    }
+  }
+
+  const rewardAccounts = (asset: PublicKey) => ({
+    owner: provider.wallet.publicKey,
+    updateAuthority,
+    config,
+    rewardsMint,
+    userRewardsAta,
+    asset,
+    collection: collectionKeypair.publicKey,
+    mplCoreProgram: MPL_CORE_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
   });
 
-  it("Mint an NFT", async () => {
-    const nftName = "Test NFT";
-    const nftUri = "https://example.com/nft";
-    const tx = await program.methods.mintAsset(nftName, nftUri)
-    .accountsPartial({
-      user: provider.wallet.publicKey,
-      asset: nftKeypair.publicKey,
-      collection: collectionKeypair.publicKey,
-      updateAuthority,
-      systemProgram: SystemProgram.programId,
-      mplCoreProgram: MPL_CORE_PROGRAM_ID,
-    })
-    .signers([nftKeypair])
-    .rpc();
-    console.log("\nYour transaction signature", tx);
-    console.log("NFT address", nftKeypair.publicKey.toBase58());
-  });
-
-  it("Initialize Config", async () => {
-    const tx = await program.methods.initialize(REWARDS_BPS, FREEZE_PERIOD_IN_DAYS)
-    .accountsPartial({
-      admin: provider.wallet.publicKey,
-      collection: collectionKeypair.publicKey,
-      updateAuthority,
-      config,
-      rewardsMint,
-      systemProgram: SystemProgram.programId,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .rpc();
-    console.log("\nYour transaction signature", tx);
-    console.log("Config address", config.toBase58());
-    console.log("Rewards BPS", REWARDS_BPS);
-    console.log("Freeze period in days", FREEZE_PERIOD_IN_DAYS);
-    console.log("Rewards mint address", rewardsMint.toBase58());
-  });
-
-  it("Stake an NFT", async () => {
-    const tx = await program.methods.stake()
-    .accountsPartial({
+  const stakeNft = (asset: PublicKey) =>
+    program.methods.stake().accountsPartial({
       owner: provider.wallet.publicKey,
       updateAuthority,
       config,
-      asset: nftKeypair.publicKey,
+      asset,
       collection: collectionKeypair.publicKey,
       systemProgram: SystemProgram.programId,
       mplCoreProgram: MPL_CORE_PROGRAM_ID,
-    })
-    .rpc();
-    console.log("\nYour transaction signature", tx);
+    }).rpc();
+
+  const mintNft = (kp: anchor.web3.Keypair, name: string) =>
+    program.methods.mintAsset(name, "https://example.com/nft").accountsPartial({
+      user: provider.wallet.publicKey,
+      asset: kp.publicKey,
+      collection: collectionKeypair.publicKey,
+      updateAuthority,
+      systemProgram: SystemProgram.programId,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+    }).signers([kp]).rpc();
+
+  // ---------- setup ----------
+  it("Create a collection (total_staked starts at 0)", async () => {
+    await program.methods.createCollection("Test Collection", "https://example.com/collection")
+      .accountsPartial({
+        payer: provider.wallet.publicKey,
+        collection: collectionKeypair.publicKey,
+        updateAuthority,
+        systemProgram: SystemProgram.programId,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      })
+      .signers([collectionKeypair])
+      .rpc();
+    assert.strictEqual(await readAttr(collectionKeypair.publicKey, "total_staked"), "0");
   });
 
-  it("Try to unstake an NFT before the freeze period ends", async () => {
-    // Get the user rewards ATA account
-    const userRewardsAta = getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
-    try {
-      const tx = await program.methods.unstake()
+  it("Mint two NFTs", async () => {
+    await mintNft(nftClaim, "NFT Claim");
+    await mintNft(nftBurn, "NFT Burn");
+  });
+
+  it("Initialize Config", async () => {
+    await program.methods.initialize(REWARDS_BPS, FREEZE_PERIOD_IN_DAYS)
       .accountsPartial({
-        owner: provider.wallet.publicKey,
+        admin: provider.wallet.publicKey,
+        collection: collectionKeypair.publicKey,
         updateAuthority,
         config,
         rewardsMint,
-        userRewardsAta,
-        asset: nftKeypair.publicKey,
-        collection: collectionKeypair.publicKey,
-        mplCoreProgram: MPL_CORE_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
         tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       })
       .rpc();
-      throw new Error(`Unstake should have failed before freeze period elapsed, but succeeded with tx: ${tx}`);
+  });
+
+  // ---------- Task 1.3: total_staked ----------
+  it("Stake both NFTs -> total_staked = 2", async () => {
+    await stakeNft(nftClaim.publicKey);
+    assert.strictEqual(await readAttr(collectionKeypair.publicKey, "total_staked"), "1");
+    await stakeNft(nftBurn.publicKey);
+    assert.strictEqual(await readAttr(collectionKeypair.publicKey, "total_staked"), "2");
+    assert.strictEqual(await readAttr(nftClaim.publicKey, "staked"), "true");
+  });
+
+  it("Unstake before the freeze period fails", async () => {
+    try {
+      await program.methods.unstake().accountsPartial(rewardAccounts(nftClaim.publicKey)).rpc();
+      assert.fail("unstake should have failed");
     } catch (err) {
-      if (err instanceof anchor.AnchorError && err.error.errorCode.code === "FreezePeriodNotElapsed") {
-        console.log("\nUnstake failed as expected:", err.error.errorMessage);
+      if (err instanceof anchor.AnchorError) {
+        assert.strictEqual(err.error.errorCode.code, "FreezePeriodNotElapsed");
+      } else {
+        throw err;
+      }
+    }
+  });
+
+  it("Claim before a full day has passed fails", async () => {
+    try {
+      await program.methods.claimRewards().accountsPartial(rewardAccounts(nftClaim.publicKey)).rpc();
+      assert.fail("claim should have failed");
+    } catch (err) {
+      if (err instanceof anchor.AnchorError) {
+        assert.strictEqual(err.error.errorCode.code, "NothingToClaim");
       } else {
         throw err;
       }
@@ -161,31 +179,54 @@ describe("anchor-core-staking", () => {
   });
 
   it("Time travel to the future", async () => {
-    // Advance time in milliseconds
-    const currentTimestamp = Date.now();
-    await advanceTime({ absoluteTimestamp: currentTimestamp + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
-    console.log("\nTime traveled in days", TIME_TRAVEL_IN_DAYS)
+    await advanceTime({ absoluteTimestamp: Date.now() + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
   });
 
-  it("Unstake an NFT", async () => {
-    // Get the user rewards ATA account
-    const userRewardsAta = getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
-    const tx = await program.methods.unstake()
-    .accountsPartial({
-      owner: provider.wallet.publicKey,
-      updateAuthority,
-      config,
-      rewardsMint,
-      userRewardsAta,
-      asset: nftKeypair.publicKey,
-      collection: collectionKeypair.publicKey,
-      mplCoreProgram: MPL_CORE_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-    })
-    .rpc();
-    console.log("\nYour transaction signature", tx);
-    console.log("User rewards balance", (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount);
+  // ---------- Task 1.1: claim_rewards ----------
+  it("Claim rewards without unstaking", async () => {
+    const before = await balance();
+    await program.methods.claimRewards().accountsPartial(rewardAccounts(nftClaim.publicKey)).rpc();
+    const after = await balance();
+    console.log("Claimed (tokens):", Number(after - before) / 1e6);
+    assert.ok(after - before >= BigInt(TIME_TRAVEL_IN_DAYS) * ONE_TOKEN, "expected ~8 tokens");
+    // Still staked and still counted
+    assert.strictEqual(await readAttr(nftClaim.publicKey, "staked"), "true");
+    assert.strictEqual(await readAttr(collectionKeypair.publicKey, "total_staked"), "2");
+  });
+
+  it("Claiming again right away fails (no double claim)", async () => {
+    try {
+      await program.methods.claimRewards().accountsPartial(rewardAccounts(nftClaim.publicKey)).rpc();
+      assert.fail("second claim should have failed");
+    } catch (err) {
+      if (err instanceof anchor.AnchorError) {
+        assert.strictEqual(err.error.errorCode.code, "NothingToClaim");
+      } else {
+        throw err;
+      }
+    }
+  });
+
+  // ---------- Task 1.2: burn_staked_nft ----------
+  it("Burn a staked NFT for the bonus", async () => {
+    const before = await balance();
+    await program.methods.burnStakedNft().accountsPartial(rewardAccounts(nftBurn.publicKey)).rpc();
+    const after = await balance();
+    console.log("Burn reward (tokens):", Number(after - before) / 1e6);
+    assert.ok(
+      after - before >= BigInt(TIME_TRAVEL_IN_DAYS + BURN_BONUS_DAYS) * ONE_TOKEN,
+      "expected accrued rewards + burn bonus"
+    );
+    // The asset is gone (Core leaves at most a 1-byte stub)
+    const info = await provider.connection.getAccountInfo(nftBurn.publicKey);
+    assert.ok(info === null || info.data.length <= 1, "asset should be burned");
+    // Counter decremented
+    assert.strictEqual(await readAttr(collectionKeypair.publicKey, "total_staked"), "1");
+  });
+
+  it("Unstake the remaining NFT -> total_staked = 0", async () => {
+    await program.methods.unstake().accountsPartial(rewardAccounts(nftClaim.publicKey)).rpc();
+    assert.strictEqual(await readAttr(nftClaim.publicKey, "staked"), "false");
+    assert.strictEqual(await readAttr(collectionKeypair.publicKey, "total_staked"), "0");
   });
 });

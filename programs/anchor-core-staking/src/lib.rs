@@ -12,7 +12,7 @@ pub use constants::*;
 pub use instructions::*;
 pub use state::*;
 
-declare_id!("FkP21JjeMc9gcq9iBQBHfLocaLsxCYGLg4jgwin6pBwG");
+declare_id!("6PMpnJgDwFuANLYJsjgqekhY7ortcdE27nzGA8TcRMrS");
 
 #[program]
 pub mod anchor_core_staking {
