@@ -95,8 +95,10 @@ Restart Surfpool after rebuilding so it loads the new program.
 
 All 18 tests pass (11 for Task 1 in `tests/anchor-core-staking.ts`, 7 for the Oracle in `tests/oracle.ts`).
 
-![All 18 tests passing](docs/tests-all.png)
+![All 18 tests passing]<img width="1247" height="761" alt="Screenshot 2026-10-03 041320" src="https://github.com/user-attachments/assets/06d3f3a4-a344-4bb5-9431-4e02b403c1ee" />
+
 
 Task 1 on its own (claim without unstaking, burn-to-earn, `total_staked` counter):
 
-![Task 1 tests passing](docs/tests-task1.png)
+![Task 1 tests passing]<img width="1900" height="821" alt="Screenshot 2026-10-03 040438" src="https://github.com/user-attachments/assets/c38fcd0d-ff58-4bd4-9f7a-d0e902458798" />
+
