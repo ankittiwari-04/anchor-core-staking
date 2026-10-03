@@ -90,3 +90,13 @@ Restart Surfpool after rebuilding so it loads the new program.
 - Re-staking an NFT after unstaking fails, because `stake` adds the FreezeDelegate and BurnDelegate plugins again (carried over from the template).
 - The crank reward vault must be funded manually (a plain SOL transfer to the vault PDA).
 - The reward formula is linear in whole days; the burn bonus is a flat number of days of rewards.
+
+## Test results
+
+All 18 tests pass (11 for Task 1 in `tests/anchor-core-staking.ts`, 7 for the Oracle in `tests/oracle.ts`).
+
+![All 18 tests passing](docs/tests-all.png)
+
+Task 1 on its own (claim without unstaking, burn-to-earn, `total_staked` counter):
+
+![Task 1 tests passing](docs/tests-task1.png)
